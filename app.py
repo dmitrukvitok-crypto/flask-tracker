@@ -11,6 +11,8 @@ DB = "visitors.db"
 def init_db():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
+    
+    # Створюємо таблицю, якщо її ще немає (стара версія)
     cur.execute("""
     CREATE TABLE IF NOT EXISTS visitors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -19,46 +21,61 @@ def init_db():
         browser TEXT,
         os TEXT,
         device TEXT,
-        user_agent TEXT,
-        referrer TEXT,
-        languages TEXT,
-        full_path TEXT,
-        country TEXT,
-        city TEXT,
-        region TEXT,
-        latitude REAL,
-        longitude REAL,
-        fingerprint TEXT
+        user_agent TEXT
     )
     """)
+    
+    # === Міграція: додаємо нові колонки, якщо їх немає ===
+    new_columns = [
+        ("referrer", "TEXT"),
+        ("languages", "TEXT"),
+        ("full_path", "TEXT"),
+        ("country", "TEXT"),
+        ("city", "TEXT"),
+        ("region", "TEXT"),
+        ("latitude", "REAL"),
+        ("longitude", "REAL"),
+        ("fingerprint", "TEXT")
+    ]
+    
+    for col_name, col_type in new_columns:
+        try:
+            cur.execute(f"ALTER TABLE visitors ADD COLUMN {col_name} {col_type}")
+            print(f"Колонка {col_name} успішно додана")
+        except sqlite3.OperationalError:
+            pass  # колонка вже існує — ігноруємо
+    
     conn.commit()
     conn.close()
 
 init_db()
 
 def get_geolocation(ip):
-    """Безкоштовний geo lookup"""
-    if not ip or ip in ['127.0.0.1', '::1']:
+    if not ip or ip in ['127.0.0.1', '::1', 'localhost']:
         return {}, None
     try:
-        response = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city,lat,lon", timeout=5)
+        response = requests.get(
+            f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city,lat,lon",
+            timeout=5
+        )
         if response.status_code == 200:
             data = response.json()
             if data.get("status") == "success":
                 return data, None
-            return {}, data.get("message")
-    except Exception as e:
-        return {}, str(e)
+    except:
+        pass
     return {}, None
 
 def generate_fingerprint(ip, ua_string):
-    """Простий fingerprint"""
-    data = f"{ip}{ua_string}{request.headers.get('Accept-Language', '')}"
-    return hashlib.md5(data.encode()).hexdigest()[:16]
+    try:
+        data = f"{ip}{ua_string}{request.headers.get('Accept-Language', '')}"
+        return hashlib.md5(data.encode('utf-8')).hexdigest()[:16]
+    except:
+        return "unknown"
 
 @app.route("/")
 def index():
-    # IP
+    # IP адреса
     ip = request.headers.get("X-Forwarded-For", request.remote_addr)
     if ',' in ip:
         ip = ip.split(',')[0].strip()
@@ -66,14 +83,15 @@ def index():
     ua_string = request.headers.get("User-Agent", "")
     ua = parse(ua_string)
 
-    # Geo
-    geo_data, geo_error = get_geolocation(ip)
+    # Geo-location
+    geo_data, _ = get_geolocation(ip)
 
     # Fingerprint
     fingerprint = generate_fingerprint(ip, ua_string)
 
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
+    
     cur.execute("""
     INSERT INTO visitors 
     (visit_time, ip, browser, os, device, user_agent, referrer, languages, 
@@ -82,12 +100,12 @@ def index():
     """, (
         datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         ip,
-        ua.browser.family,
-        ua.os.family,
-        ua.device.family,
+        ua.browser.family or "Unknown",
+        ua.os.family or "Unknown",
+        ua.device.family or "Unknown",
         ua_string,
         request.referrer,
-        request.accept_languages,
+        str(request.accept_languages),
         request.url,
         geo_data.get("country"),
         geo_data.get("city"),
@@ -119,9 +137,9 @@ def admin():
     conn.close()
 
     html = """
-    <h1>Відвідувачі — Розширена аналітика</h1>
-    <p><a href="/admin/export">Завантажити CSV</a></p>
-    <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%;">
+    <h1>Відвідувачі — Розширена статистика</h1>
+    <p><a href="/admin/export">📥 Завантажити CSV</a></p>
+    <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%; font-size: 14px;">
         <tr style="background: #f0f0f0;">
             <th>Час (UTC)</th>
             <th>IP</th>
@@ -172,7 +190,7 @@ def export_csv():
 
     return si.getvalue(), 200, {
         'Content-Type': 'text/csv',
-        'Content-Disposition': 'attachment; filename=visitors_export.csv'
+        'Content-Disposition': f'attachment; filename=visitors_{datetime.now().strftime("%Y%m%d")}.csv'
     }
 
 if __name__ == "__main__":

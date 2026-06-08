@@ -1,4 +1,4 @@
-from flask import Flask, request, render_template_string
+from flask import Flask, request, render_template_string, jsonify
 from user_agents import parse
 import sqlite3
 from datetime import datetime
@@ -20,7 +20,11 @@ def init_db():
         browser TEXT,
         os TEXT,
         device TEXT,
-        user_agent TEXT
+        screen TEXT,
+        language TEXT,
+        timezone TEXT,
+        cpu TEXT,
+        memory TEXT
     )
     """)
 
@@ -33,6 +37,43 @@ init_db()
 
 @app.route("/")
 def index():
+    return """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Visitor Tracker</title>
+    </head>
+    <body>
+
+    <h1>Ласкаво просимо!</h1>
+    <p>Ваш візит зареєстровано.</p>
+
+    <script>
+    fetch("/track", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            screen: screen.width + "x" + screen.height,
+            language: navigator.language,
+            timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+            cpu: navigator.hardwareConcurrency,
+            memory: navigator.deviceMemory || "невідомо"
+        })
+    });
+    </script>
+
+    </body>
+    </html>
+    """
+
+
+@app.route("/track", methods=["POST"])
+def track():
+
+    data = request.get_json()
 
     forwarded = request.headers.get("X-Forwarded-For")
 
@@ -44,33 +85,44 @@ def index():
     ua_string = request.headers.get("User-Agent", "")
     ua = parse(ua_string)
 
-    browser = ua.browser.family
-    os_name = ua.os.family
+    browser = f"{ua.browser.family} {ua.browser.version_string}"
+    os_name = f"{ua.os.family} {ua.os.version_string}"
     device = ua.device.family
 
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
 
     cur.execute("""
-    INSERT INTO visitors
-    (visit_time, ip, browser, os, device, user_agent)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO visitors (
+        visit_time,
+        ip,
+        browser,
+        os,
+        device,
+        screen,
+        language,
+        timezone,
+        cpu,
+        memory
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ip,
         browser,
         os_name,
         device,
-        ua_string
+        data.get("screen"),
+        data.get("language"),
+        data.get("timezone"),
+        str(data.get("cpu")),
+        str(data.get("memory"))
     ))
 
     conn.commit()
     conn.close()
 
-    return """
-    <h1>Ласкаво просимо!</h1>
-    <p>Ваш візит зареєстровано.</p>
-    """
+    return jsonify({"status": "ok"})
 
 
 @app.route("/admin")
@@ -80,7 +132,17 @@ def admin():
     cur = conn.cursor()
 
     cur.execute("""
-    SELECT visit_time, ip, browser, os, device
+    SELECT
+        visit_time,
+        ip,
+        browser,
+        os,
+        device,
+        screen,
+        language,
+        timezone,
+        cpu,
+        memory
     FROM visitors
     ORDER BY id DESC
     """)
@@ -98,6 +160,11 @@ def admin():
             <th>Браузер</th>
             <th>ОС</th>
             <th>Пристрій</th>
+            <th>Екран</th>
+            <th>Мова</th>
+            <th>Часовий пояс</th>
+            <th>CPU</th>
+            <th>RAM</th>
         </tr>
     """
 
@@ -109,6 +176,11 @@ def admin():
             <td>{row[2]}</td>
             <td>{row[3]}</td>
             <td>{row[4]}</td>
+            <td>{row[5]}</td>
+            <td>{row[6]}</td>
+            <td>{row[7]}</td>
+            <td>{row[8]}</td>
+            <td>{row[9]}</td>
         </tr>
         """
 

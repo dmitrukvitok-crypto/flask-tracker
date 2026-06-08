@@ -1,4 +1,4 @@
 flask
 user-agents
 gunicorn
-requests   # для geo-location
+requests

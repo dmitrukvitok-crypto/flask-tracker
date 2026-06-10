@@ -1,16 +1,26 @@
 from flask import Flask, request, render_template_string
 from user_agents import parse
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 import requests
 import hashlib
-import pytz  # ← Додаємо для правильного часу
+import threading
+import time
 
 app = Flask(__name__)
 DB = "visitors.db"
 
-# Часовий пояс України
-KYIV_TZ = pytz.timezone('Europe/Kiev')
+# Самопробудження кожні 10 хвилин
+def keep_alive():
+    while True:
+        try:
+            requests.get("https://flask-tracker-hn13.onrender.com/ping", timeout=10)
+        except:
+            pass
+        time.sleep(600)  # 10 хвилин
+
+# Запускаємо в окремому потоці
+threading.Thread(target=keep_alive, daemon=True).start()
 
 def init_db():
     conn = sqlite3.connect(DB)
@@ -70,6 +80,11 @@ def generate_fingerprint(ip, ua_string):
     except:
         return "unknown"
 
+# Сторінка для пінгу
+@app.route("/ping")
+def ping():
+    return "ok", 200
+
 @app.route("/")
 def index():
     return render_template_string("""
@@ -125,8 +140,9 @@ def track():
         geo_data, _ = get_geolocation(ip)
         fingerprint = generate_fingerprint(ip, ua_string)
 
-        # Правильний час для України
-        visit_time = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M:%S")
+        # Київський час (UTC+3)
+        kyiv_time = datetime.utcnow() + timedelta(hours=3)
+        visit_time = kyiv_time.strftime("%Y-%m-%d %H:%M:%S")
 
         conn = sqlite3.connect(DB)
         cur = conn.cursor()
@@ -140,8 +156,7 @@ def track():
          gpu_vendor, gpu_renderer)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            visit_time,
-            ip,
+            visit_time, ip,
             ua.browser.family or "Unknown",
             ua.os.family or "Unknown",
             ua.device.family or "Unknown",
@@ -191,7 +206,7 @@ def admin():
 
     html = """
     <h1>Відвідувачі — Розширена аналітика</h1>
-    <p><a href="/admin/export">📥 Завантажити CSV</a></p>
+    <p><a href="/admin/export">📥 Завантажити CSV</a> | <a href="/ping">Ping</a></p>
     <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%; font-size: 14px;">
         <tr style="background: #f0f0f0;">
             <th>Час (Київ)</th><th>IP</th><th>Країна</th><th>Місто</th>
@@ -229,7 +244,7 @@ def export_csv():
     csv.writer(si).writerows([columns] + rows)
     return si.getvalue(), 200, {
         'Content-Type': 'text/csv',
-        'Content-Disposition': f'attachment; filename=visitors_{datetime.now(KYIV_TZ).strftime("%Y%m%d_%H%M")}.csv'
+        'Content-Disposition': 'attachment; filename=visitors.csv'
     }
 
 if __name__ == "__main__":

@@ -1,40 +1,33 @@
 from flask import Flask, request, render_template_string
 from user_agents import parse
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import sqlite3
 from datetime import datetime, timedelta
 import requests
 import hashlib
-import os
 import threading
 import time
 
 app = Flask(__name__)
-DATABASE_URL = os.environ.get('DATABASE_URL')
+DB = "visitors.db"   # Звичайна база
 
 # Keep-alive
 def keep_alive():
     while True:
         try:
-            requests.get("https://flask-tracker-hn13.onrender.com/ping", timeout=10)
+            requests.get("https://flask-tracker-hn13.onrender.com/ping", timeout=15)
         except:
             pass
         time.sleep(600)
 
 threading.Thread(target=keep_alive, daemon=True).start()
 
-def get_db_connection():
-    conn = psycopg2.connect(DATABASE_URL)
-    return conn
-
 def init_db():
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB)
     cur = conn.cursor()
-    
     cur.execute("""
     CREATE TABLE IF NOT EXISTS visitors (
-        id SERIAL PRIMARY KEY,
-        visit_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        visit_time TEXT,
         ip TEXT,
         browser TEXT,
         os TEXT,
@@ -62,7 +55,6 @@ def init_db():
     )
     """)
     conn.commit()
-    cur.close()
     conn.close()
 
 init_db()
@@ -136,55 +128,40 @@ def track():
     try:
         client_data = request.get_json() or {}
         ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-        if ',' in ip:
-            ip = ip.split(',')[0].strip()
+        if ',' in ip: ip = ip.split(',')[0].strip()
 
         ua_string = request.headers.get("User-Agent", "")
         ua = parse(ua_string)
         geo = get_geolocation(ip)
         fingerprint = generate_fingerprint(ip, ua_string)
 
-        conn = get_db_connection()
+        kyiv_time = datetime.utcnow() + timedelta(hours=3)
+        visit_time = kyiv_time.strftime("%Y-%m-%d %H:%M:%S")
+
+        conn = sqlite3.connect(DB)
         cur = conn.cursor()
-        
         cur.execute("""
         INSERT INTO visitors 
-        (ip, browser, os, device, user_agent, referrer, languages, full_path,
+        (visit_time, ip, browser, os, device, user_agent, referrer, languages, full_path,
          country, city, region, latitude, longitude, fingerprint,
          screen_width, screen_height, screen_color_depth, pixel_ratio,
          avail_width, avail_height, screen_orientation, hardware_concurrency,
          gpu_vendor, gpu_renderer)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            ip,
-            ua.browser.family or "Unknown",
-            ua.os.family or "Unknown",
-            ua.device.family or "Unknown",
-            ua_string,
-            request.referrer,
-            str(request.accept_languages),
-            request.url,
-            geo.get("country"),
-            geo.get("city"),
-            geo.get("regionName"),
-            geo.get("lat"),
-            geo.get("lon"),
-            fingerprint,
-            client_data.get("screen_width"),
-            client_data.get("screen_height"),
-            client_data.get("screen_color_depth"),
-            client_data.get("pixel_ratio"),
-            client_data.get("avail_width"),
-            client_data.get("avail_height"),
-            client_data.get("screen_orientation"),
-            client_data.get("hardware_concurrency"),
-            client_data.get("gpu_vendor"),
-            client_data.get("gpu_renderer")
+            visit_time, ip,
+            ua.browser.family or "Unknown", ua.os.family or "Unknown", ua.device.family or "Unknown",
+            ua_string, request.referrer, str(request.accept_languages), request.url,
+            geo.get("country"), geo.get("city"), geo.get("regionName"),
+            geo.get("lat"), geo.get("lon"), fingerprint,
+            client_data.get("screen_width"), client_data.get("screen_height"),
+            client_data.get("screen_color_depth"), client_data.get("pixel_ratio"),
+            client_data.get("avail_width"), client_data.get("avail_height"),
+            client_data.get("screen_orientation"), client_data.get("hardware_concurrency"),
+            client_data.get("gpu_vendor"), client_data.get("gpu_renderer")
         ))
         conn.commit()
-        cur.close()
         conn.close()
-        
         return "ok", 200
     except Exception as e:
         print("Track error:", e)
@@ -192,36 +169,28 @@ def track():
 
 @app.route("/admin")
 def admin():
-    conn = get_db_connection()
-    cur = conn.cursor(cursor_factory=RealDictCursor)
+    conn = sqlite3.connect(DB)
+    cur = conn.cursor()
     cur.execute("SELECT * FROM visitors ORDER BY id DESC")
     rows = cur.fetchall()
-    cur.close()
     conn.close()
 
     html = """
-    <h1>Відвідувачі — PostgreSQL</h1>
+    <h1>Відвідувачі (Free план)</h1>
     <p><a href="/admin/export">📥 Завантажити CSV</a></p>
     <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%;">
         <tr style="background: #f0f0f0;">
-            <th>Час</th><th>IP</th><th>Країна</th><th>Місто</th>
+            <th>Час (Київ)</th><th>IP</th><th>Країна</th><th>Місто</th>
             <th>Браузер</th><th>ОС</th><th>Екран</th><th>CPU</th><th>GPU</th>
         </tr>
     """
     for row in rows:
-        screen = f"{row['screen_width']}×{row['screen_height']}" if row['screen_width'] else "-"
-        gpu = row['gpu_renderer'] or "-"
+        screen = f"{row[15]}×{row[16]}" if row[15] and row[16] else "-"
+        gpu = row[24] if len(row) > 24 else "-"
         html += f"""
         <tr>
-            <td>{row['visit_time']}</td>
-            <td>{row['ip']}</td>
-            <td>{row['country'] or '-'}</td>
-            <td>{row['city'] or '-'}</td>
-            <td>{row['browser']}</td>
-            <td>{row['os']}</td>
-            <td>{screen}</td>
-            <td>{row['hardware_concurrency'] or '-'}</td>
-            <td>{gpu}</td>
+            <td>{row[1]}</td><td>{row[2]}</td><td>{row[9] or '-'}</td><td>{row[10] or '-'}</td>
+            <td>{row[3]}</td><td>{row[4]}</td><td>{screen}</td><td>{row[21] or '-'}</td><td>{gpu}</td>
         </tr>
         """
     html += "</table>"
@@ -231,18 +200,15 @@ def admin():
 def export_csv():
     import csv
     from io import StringIO
-    conn = get_db_connection()
+    conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT * FROM visitors ORDER BY id DESC")
     rows = cur.fetchall()
-    columns = [desc[0] for desc in cur.description]
+    columns = [description[0] for description in cur.description]
     conn.close()
 
     si = StringIO()
-    cw = csv.writer(si)
-    cw.writerow(columns)
-    cw.writerows(rows)
-    
+    csv.writer(si).writerows([columns] + rows)
     return si.getvalue(), 200, {
         'Content-Type': 'text/csv',
         'Content-Disposition': 'attachment; filename=visitors.csv'

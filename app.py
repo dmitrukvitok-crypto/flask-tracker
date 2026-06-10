@@ -145,7 +145,7 @@ def index():
 </head>
 <body>
 
-<img src="{{ url_for('static', filename='welcome.jpg') }}"
+<img src="{{ url_for('static', filename='welcome.jpg.png') }}">
      alt="Welcome"
      style="max-width:100%; height:auto;">
 

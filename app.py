@@ -145,8 +145,9 @@ def index():
 </head>
 <body>
 
-<h1>Ласкаво просимо!</h1>
-<p>Ваш візит зареєстровано.</p>
+<img src="{{ url_for('static', filename='welcome.jpg') }}"
+     alt="Welcome"
+     style="max-width:100%; height:auto;">
 
 <script>
 async function collectData() {

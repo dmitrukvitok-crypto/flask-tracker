@@ -26,7 +26,7 @@ def init_db():
     )
     """)
     
-    # Міграція — додаємо всі нові колонки
+    # Міграція — додаємо всі колонки
     new_columns = [
         ("referrer", "TEXT"),
         ("languages", "TEXT"),
@@ -37,21 +37,21 @@ def init_db():
         ("latitude", "REAL"),
         ("longitude", "REAL"),
         ("fingerprint", "TEXT"),
-        # Нові колонки для екрану
         ("screen_width", "INTEGER"),
         ("screen_height", "INTEGER"),
         ("screen_color_depth", "INTEGER"),
         ("pixel_ratio", "REAL"),
         ("avail_width", "INTEGER"),
         ("avail_height", "INTEGER"),
-        ("screen_orientation", "TEXT")
+        ("screen_orientation", "TEXT"),
+        ("hardware_concurrency", "INTEGER")   # ← НОВА КОЛОНКА
     ]
     
     for col_name, col_type in new_columns:
         try:
             cur.execute(f"ALTER TABLE visitors ADD COLUMN {col_name} {col_type}")
         except sqlite3.OperationalError:
-            pass  # вже існує
+            pass  # колонка вже існує
     
     conn.commit()
     conn.close()
@@ -62,7 +62,10 @@ def get_geolocation(ip):
     if not ip or ip in ['127.0.0.1', '::1']:
         return {}, None
     try:
-        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,lat,lon", timeout=5)
+        r = requests.get(
+            f"http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,lat,lon",
+            timeout=5
+        )
         if r.status_code == 200:
             data = r.json()
             if data.get("status") == "success":
@@ -85,7 +88,6 @@ def index():
     <p>Ваш візит детально зареєстровано.</p>
     
     <script>
-    // Збираємо дані екрану
     const screenData = {
         screen_width: screen.width,
         screen_height: screen.height,
@@ -93,15 +95,15 @@ def index():
         pixel_ratio: window.devicePixelRatio,
         avail_width: screen.availWidth,
         avail_height: screen.availHeight,
-        screen_orientation: screen.orientation ? screen.orientation.type : 'unknown'
+        screen_orientation: screen.orientation ? screen.orientation.type : 'unknown',
+        hardware_concurrency: navigator.hardwareConcurrency || null
     };
 
-    // Відправляємо дані на сервер
     fetch('/track', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(screenData)
-    }).catch(() => {}); // не показуємо помилки користувачу
+    }).catch(() => {});
     </script>
     """)
 
@@ -128,8 +130,8 @@ def track():
         (visit_time, ip, browser, os, device, user_agent, referrer, languages, 
          full_path, country, city, region, latitude, longitude, fingerprint,
          screen_width, screen_height, screen_color_depth, pixel_ratio,
-         avail_width, avail_height, screen_orientation)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         avail_width, avail_height, screen_orientation, hardware_concurrency)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             ip,
@@ -152,13 +154,15 @@ def track():
             screen_data.get("pixel_ratio"),
             screen_data.get("avail_width"),
             screen_data.get("avail_height"),
-            screen_data.get("screen_orientation")
+            screen_data.get("screen_orientation"),
+            screen_data.get("hardware_concurrency")
         ))
         conn.commit()
         conn.close()
         
         return "ok", 200
-    except:
+    except Exception as e:
+        print("Error in /track:", e)
         return "error", 500
 
 @app.route("/admin")
@@ -168,8 +172,8 @@ def admin():
     cur.execute("""
     SELECT 
         visit_time, ip, country, city, browser, os, device,
-        screen_width, screen_height, pixel_ratio, screen_orientation,
-        referrer, languages, fingerprint
+        screen_width, screen_height, hardware_concurrency, pixel_ratio, 
+        screen_orientation, referrer, languages, fingerprint
     FROM visitors 
     ORDER BY id DESC
     """)
@@ -189,6 +193,7 @@ def admin():
             <th>ОС</th>
             <th>Пристрій</th>
             <th>Екран</th>
+            <th>Ядер CPU</th>
             <th>Pixel Ratio</th>
             <th>Орієнтація</th>
             <th>Referrer</th>
@@ -210,7 +215,8 @@ def admin():
             <td>{row[9] or '-'}</td>
             <td>{row[10] or '-'}</td>
             <td>{row[11] or '-'}</td>
-            <td>{row[12]}</td>
+            <td>{row[12] or '-'}</td>
+            <td>{row[13]}</td>
         </tr>
         """
     html += "</table>"

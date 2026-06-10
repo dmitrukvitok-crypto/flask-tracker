@@ -4,7 +4,6 @@ import sqlite3
 from datetime import datetime
 import requests
 import hashlib
-import json
 
 app = Flask(__name__)
 DB = "visitors.db"
@@ -13,7 +12,6 @@ def init_db():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     
-    # Базова таблиця
     cur.execute("""
     CREATE TABLE IF NOT EXISTS visitors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -26,7 +24,6 @@ def init_db():
     )
     """)
     
-    # Міграція — додаємо всі колонки
     new_columns = [
         ("referrer", "TEXT"),
         ("languages", "TEXT"),
@@ -44,14 +41,16 @@ def init_db():
         ("avail_width", "INTEGER"),
         ("avail_height", "INTEGER"),
         ("screen_orientation", "TEXT"),
-        ("hardware_concurrency", "INTEGER")   # ← НОВА КОЛОНКА
+        ("hardware_concurrency", "INTEGER"),
+        ("gpu_vendor", "TEXT"),      # ← Нове
+        ("gpu_renderer", "TEXT")     # ← Нове
     ]
     
     for col_name, col_type in new_columns:
         try:
             cur.execute(f"ALTER TABLE visitors ADD COLUMN {col_name} {col_type}")
         except sqlite3.OperationalError:
-            pass  # колонка вже існує
+            pass
     
     conn.commit()
     conn.close()
@@ -62,10 +61,7 @@ def get_geolocation(ip):
     if not ip or ip in ['127.0.0.1', '::1']:
         return {}, None
     try:
-        r = requests.get(
-            f"http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,lat,lon",
-            timeout=5
-        )
+        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,lat,lon", timeout=5)
         if r.status_code == 200:
             data = r.json()
             if data.get("status") == "success":
@@ -88,7 +84,8 @@ def index():
     <p>Ваш візит детально зареєстровано.</p>
     
     <script>
-    const screenData = {
+    // Збираємо дані
+    const data = {
         screen_width: screen.width,
         screen_height: screen.height,
         screen_color_depth: screen.colorDepth,
@@ -96,13 +93,29 @@ def index():
         avail_width: screen.availWidth,
         avail_height: screen.availHeight,
         screen_orientation: screen.orientation ? screen.orientation.type : 'unknown',
-        hardware_concurrency: navigator.hardwareConcurrency || null
+        hardware_concurrency: navigator.hardwareConcurrency || null,
+        gpu_vendor: null,
+        gpu_renderer: null
     };
 
+    // WebGL — визначення відеокарти
+    try {
+        const canvas = document.createElement('canvas');
+        const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+        if (gl) {
+            const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
+            if (debugInfo) {
+                data.gpu_vendor = gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL);
+                data.gpu_renderer = gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL);
+            }
+        }
+    } catch(e) {}
+
+    // Відправка даних
     fetch('/track', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(screenData)
+        body: JSON.stringify(data)
     }).catch(() => {});
     </script>
     """)
@@ -110,11 +123,10 @@ def index():
 @app.route("/track", methods=["POST"])
 def track():
     try:
-        screen_data = request.get_json() or {}
+        client_data = request.get_json() or {}
         
         ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-        if ',' in ip:
-            ip = ip.split(',')[0].strip()
+        if ',' in ip: ip = ip.split(',')[0].strip()
 
         ua_string = request.headers.get("User-Agent", "")
         ua = parse(ua_string)
@@ -127,11 +139,12 @@ def track():
         
         cur.execute("""
         INSERT INTO visitors 
-        (visit_time, ip, browser, os, device, user_agent, referrer, languages, 
-         full_path, country, city, region, latitude, longitude, fingerprint,
+        (visit_time, ip, browser, os, device, user_agent, referrer, languages, full_path,
+         country, city, region, latitude, longitude, fingerprint,
          screen_width, screen_height, screen_color_depth, pixel_ratio,
-         avail_width, avail_height, screen_orientation, hardware_concurrency)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         avail_width, avail_height, screen_orientation, hardware_concurrency,
+         gpu_vendor, gpu_renderer)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
             ip,
@@ -148,21 +161,23 @@ def track():
             geo_data.get("lat"),
             geo_data.get("lon"),
             fingerprint,
-            screen_data.get("screen_width"),
-            screen_data.get("screen_height"),
-            screen_data.get("screen_color_depth"),
-            screen_data.get("pixel_ratio"),
-            screen_data.get("avail_width"),
-            screen_data.get("avail_height"),
-            screen_data.get("screen_orientation"),
-            screen_data.get("hardware_concurrency")
+            client_data.get("screen_width"),
+            client_data.get("screen_height"),
+            client_data.get("screen_color_depth"),
+            client_data.get("pixel_ratio"),
+            client_data.get("avail_width"),
+            client_data.get("avail_height"),
+            client_data.get("screen_orientation"),
+            client_data.get("hardware_concurrency"),
+            client_data.get("gpu_vendor"),
+            client_data.get("gpu_renderer")
         ))
         conn.commit()
         conn.close()
         
         return "ok", 200
     except Exception as e:
-        print("Error in /track:", e)
+        print("Track error:", e)
         return "error", 500
 
 @app.route("/admin")
@@ -172,8 +187,8 @@ def admin():
     cur.execute("""
     SELECT 
         visit_time, ip, country, city, browser, os, device,
-        screen_width, screen_height, hardware_concurrency, pixel_ratio, 
-        screen_orientation, referrer, languages, fingerprint
+        screen_width, screen_height, hardware_concurrency,
+        gpu_vendor, gpu_renderer, referrer, fingerprint
     FROM visitors 
     ORDER BY id DESC
     """)
@@ -185,38 +200,21 @@ def admin():
     <p><a href="/admin/export">📥 Завантажити CSV</a></p>
     <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%; font-size: 14px;">
         <tr style="background: #f0f0f0;">
-            <th>Час</th>
-            <th>IP</th>
-            <th>Країна</th>
-            <th>Місто</th>
-            <th>Браузер</th>
-            <th>ОС</th>
-            <th>Пристрій</th>
-            <th>Екран</th>
-            <th>Ядер CPU</th>
-            <th>Pixel Ratio</th>
-            <th>Орієнтація</th>
-            <th>Referrer</th>
-            <th>Fingerprint</th>
+            <th>Час</th><th>IP</th><th>Країна</th><th>Місто</th>
+            <th>Браузер</th><th>ОС</th><th>Пристрій</th>
+            <th>Екран</th><th>CPU ядер</th><th>GPU Vendor</th><th>GPU Renderer</th>
+            <th>Referrer</th><th>Fingerprint</th>
         </tr>
     """
     for row in rows:
-        screen_info = f"{row[7]}×{row[8]}" if row[7] and row[8] else "-"
+        screen = f"{row[7]}×{row[8]}" if row[7] and row[8] else "-"
         html += f"""
         <tr>
-            <td>{row[0]}</td>
-            <td>{row[1]}</td>
-            <td>{row[2] or '-'}</td>
-            <td>{row[3] or '-'}</td>
-            <td>{row[4]}</td>
-            <td>{row[5]}</td>
-            <td>{row[6]}</td>
-            <td>{screen_info}</td>
-            <td>{row[9] or '-'}</td>
-            <td>{row[10] or '-'}</td>
-            <td>{row[11] or '-'}</td>
-            <td>{row[12] or '-'}</td>
-            <td>{row[13]}</td>
+            <td>{row[0]}</td><td>{row[1]}</td><td>{row[2] or '-'}</td><td>{row[3] or '-'}</td>
+            <td>{row[4]}</td><td>{row[5]}</td><td>{row[6]}</td>
+            <td>{screen}</td><td>{row[9] or '-'}</td>
+            <td>{row[10] or '-'}</td><td>{row[11] or '-'}</td>
+            <td>{row[12] or '-'}</td><td>{row[13]}</td>
         </tr>
         """
     html += "</table>"
@@ -224,8 +222,8 @@ def admin():
 
 @app.route("/admin/export")
 def export_csv():
-    from io import StringIO
     import csv
+    from io import StringIO
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT * FROM visitors ORDER BY id DESC")
@@ -234,13 +232,10 @@ def export_csv():
     conn.close()
 
     si = StringIO()
-    cw = csv.writer(si)
-    cw.writerow(columns)
-    cw.writerows(rows)
-
+    csv.writer(si).writerows([columns] + rows)
     return si.getvalue(), 200, {
         'Content-Type': 'text/csv',
-        'Content-Disposition': f'attachment; filename=visitors_{datetime.now().strftime("%Y%m%d_%H%M")}.csv'
+        'Content-Disposition': f'attachment; filename=visitors_{datetime.now().strftime("%Y%m%d")}.csv'
     }
 
 if __name__ == "__main__":

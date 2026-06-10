@@ -4,6 +4,7 @@ import sqlite3
 from datetime import datetime
 import requests
 import hashlib
+import json
 
 app = Flask(__name__)
 DB = "visitors.db"
@@ -12,7 +13,7 @@ def init_db():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     
-    # Створюємо таблицю, якщо її ще немає (стара версія)
+    # Базова таблиця
     cur.execute("""
     CREATE TABLE IF NOT EXISTS visitors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -25,7 +26,7 @@ def init_db():
     )
     """)
     
-    # === Міграція: додаємо нові колонки, якщо їх немає ===
+    # Міграція — додаємо всі нові колонки
     new_columns = [
         ("referrer", "TEXT"),
         ("languages", "TEXT"),
@@ -35,15 +36,22 @@ def init_db():
         ("region", "TEXT"),
         ("latitude", "REAL"),
         ("longitude", "REAL"),
-        ("fingerprint", "TEXT")
+        ("fingerprint", "TEXT"),
+        # Нові колонки для екрану
+        ("screen_width", "INTEGER"),
+        ("screen_height", "INTEGER"),
+        ("screen_color_depth", "INTEGER"),
+        ("pixel_ratio", "REAL"),
+        ("avail_width", "INTEGER"),
+        ("avail_height", "INTEGER"),
+        ("screen_orientation", "TEXT")
     ]
     
     for col_name, col_type in new_columns:
         try:
             cur.execute(f"ALTER TABLE visitors ADD COLUMN {col_name} {col_type}")
-            print(f"Колонка {col_name} успішно додана")
         except sqlite3.OperationalError:
-            pass  # колонка вже існує — ігноруємо
+            pass  # вже існує
     
     conn.commit()
     conn.close()
@@ -51,15 +59,12 @@ def init_db():
 init_db()
 
 def get_geolocation(ip):
-    if not ip or ip in ['127.0.0.1', '::1', 'localhost']:
+    if not ip or ip in ['127.0.0.1', '::1']:
         return {}, None
     try:
-        response = requests.get(
-            f"http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,regionName,city,lat,lon",
-            timeout=5
-        )
-        if response.status_code == 200:
-            data = response.json()
+        r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,lat,lon", timeout=5)
+        if r.status_code == 200:
+            data = r.json()
             if data.get("status") == "success":
                 return data, None
     except:
@@ -75,52 +80,86 @@ def generate_fingerprint(ip, ua_string):
 
 @app.route("/")
 def index():
-    # IP адреса
-    ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-    if ',' in ip:
-        ip = ip.split(',')[0].strip()
-
-    ua_string = request.headers.get("User-Agent", "")
-    ua = parse(ua_string)
-
-    # Geo-location
-    geo_data, _ = get_geolocation(ip)
-
-    # Fingerprint
-    fingerprint = generate_fingerprint(ip, ua_string)
-
-    conn = sqlite3.connect(DB)
-    cur = conn.cursor()
-    
-    cur.execute("""
-    INSERT INTO visitors 
-    (visit_time, ip, browser, os, device, user_agent, referrer, languages, 
-     full_path, country, city, region, latitude, longitude, fingerprint)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-        ip,
-        ua.browser.family or "Unknown",
-        ua.os.family or "Unknown",
-        ua.device.family or "Unknown",
-        ua_string,
-        request.referrer,
-        str(request.accept_languages),
-        request.url,
-        geo_data.get("country"),
-        geo_data.get("city"),
-        geo_data.get("regionName"),
-        geo_data.get("lat"),
-        geo_data.get("lon"),
-        fingerprint
-    ))
-    conn.commit()
-    conn.close()
-
-    return """
+    return render_template_string("""
     <h1>Ласкаво просимо!</h1>
     <p>Ваш візит детально зареєстровано.</p>
-    """
+    
+    <script>
+    // Збираємо дані екрану
+    const screenData = {
+        screen_width: screen.width,
+        screen_height: screen.height,
+        screen_color_depth: screen.colorDepth,
+        pixel_ratio: window.devicePixelRatio,
+        avail_width: screen.availWidth,
+        avail_height: screen.availHeight,
+        screen_orientation: screen.orientation ? screen.orientation.type : 'unknown'
+    };
+
+    // Відправляємо дані на сервер
+    fetch('/track', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(screenData)
+    }).catch(() => {}); // не показуємо помилки користувачу
+    </script>
+    """)
+
+@app.route("/track", methods=["POST"])
+def track():
+    try:
+        screen_data = request.get_json() or {}
+        
+        ip = request.headers.get("X-Forwarded-For", request.remote_addr)
+        if ',' in ip:
+            ip = ip.split(',')[0].strip()
+
+        ua_string = request.headers.get("User-Agent", "")
+        ua = parse(ua_string)
+
+        geo_data, _ = get_geolocation(ip)
+        fingerprint = generate_fingerprint(ip, ua_string)
+
+        conn = sqlite3.connect(DB)
+        cur = conn.cursor()
+        
+        cur.execute("""
+        INSERT INTO visitors 
+        (visit_time, ip, browser, os, device, user_agent, referrer, languages, 
+         full_path, country, city, region, latitude, longitude, fingerprint,
+         screen_width, screen_height, screen_color_depth, pixel_ratio,
+         avail_width, avail_height, screen_orientation)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            ip,
+            ua.browser.family or "Unknown",
+            ua.os.family or "Unknown",
+            ua.device.family or "Unknown",
+            ua_string,
+            request.referrer,
+            str(request.accept_languages),
+            request.url,
+            geo_data.get("country"),
+            geo_data.get("city"),
+            geo_data.get("regionName"),
+            geo_data.get("lat"),
+            geo_data.get("lon"),
+            fingerprint,
+            screen_data.get("screen_width"),
+            screen_data.get("screen_height"),
+            screen_data.get("screen_color_depth"),
+            screen_data.get("pixel_ratio"),
+            screen_data.get("avail_width"),
+            screen_data.get("avail_height"),
+            screen_data.get("screen_orientation")
+        ))
+        conn.commit()
+        conn.close()
+        
+        return "ok", 200
+    except:
+        return "error", 500
 
 @app.route("/admin")
 def admin():
@@ -128,7 +167,8 @@ def admin():
     cur = conn.cursor()
     cur.execute("""
     SELECT 
-        visit_time, ip, country, city, browser, os, device, 
+        visit_time, ip, country, city, browser, os, device,
+        screen_width, screen_height, pixel_ratio, screen_orientation,
         referrer, languages, fingerprint
     FROM visitors 
     ORDER BY id DESC
@@ -137,23 +177,26 @@ def admin():
     conn.close()
 
     html = """
-    <h1>Відвідувачі — Розширена статистика</h1>
+    <h1>Відвідувачі — Розширена аналітика</h1>
     <p><a href="/admin/export">📥 Завантажити CSV</a></p>
     <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%; font-size: 14px;">
         <tr style="background: #f0f0f0;">
-            <th>Час (UTC)</th>
+            <th>Час</th>
             <th>IP</th>
             <th>Країна</th>
             <th>Місто</th>
             <th>Браузер</th>
             <th>ОС</th>
             <th>Пристрій</th>
+            <th>Екран</th>
+            <th>Pixel Ratio</th>
+            <th>Орієнтація</th>
             <th>Referrer</th>
-            <th>Мови</th>
             <th>Fingerprint</th>
         </tr>
     """
     for row in rows:
+        screen_info = f"{row[7]}×{row[8]}" if row[7] and row[8] else "-"
         html += f"""
         <tr>
             <td>{row[0]}</td>
@@ -163,9 +206,11 @@ def admin():
             <td>{row[4]}</td>
             <td>{row[5]}</td>
             <td>{row[6]}</td>
-            <td>{row[7] or '-'}</td>
-            <td>{row[8] or '-'}</td>
-            <td>{row[9]}</td>
+            <td>{screen_info}</td>
+            <td>{row[9] or '-'}</td>
+            <td>{row[10] or '-'}</td>
+            <td>{row[11] or '-'}</td>
+            <td>{row[12]}</td>
         </tr>
         """
     html += "</table>"
@@ -173,9 +218,8 @@ def admin():
 
 @app.route("/admin/export")
 def export_csv():
-    import csv
     from io import StringIO
-
+    import csv
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
     cur.execute("SELECT * FROM visitors ORDER BY id DESC")
@@ -190,7 +234,7 @@ def export_csv():
 
     return si.getvalue(), 200, {
         'Content-Type': 'text/csv',
-        'Content-Disposition': f'attachment; filename=visitors_{datetime.now().strftime("%Y%m%d")}.csv'
+        'Content-Disposition': f'attachment; filename=visitors_{datetime.now().strftime("%Y%m%d_%H%M")}.csv'
     }
 
 if __name__ == "__main__":

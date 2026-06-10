@@ -4,27 +4,28 @@ import sqlite3
 from datetime import datetime, timedelta
 import requests
 import hashlib
-import os
 import threading
 import time
 
 app = Flask(__name__)
-DB = "/data/visitors.db"   # Зберігається на постійному диску
+DB = "visitors.db"
 
-# Keep-alive кожні 10 хвилин
+# Самопробудження кожні 10 хвилин
 def keep_alive():
     while True:
         try:
-            requests.get("https://flask-tracker-hn13.onrender.com/ping", timeout=15)
+            requests.get("https://flask-tracker-hn13.onrender.com/ping", timeout=10)
         except:
             pass
-        time.sleep(600)
+        time.sleep(600)  # 10 хвилин
 
+# Запускаємо в окремому потоці
 threading.Thread(target=keep_alive, daemon=True).start()
 
 def init_db():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
+    
     cur.execute("""
     CREATE TABLE IF NOT EXISTS visitors (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -33,28 +34,27 @@ def init_db():
         browser TEXT,
         os TEXT,
         device TEXT,
-        user_agent TEXT,
-        referrer TEXT,
-        languages TEXT,
-        full_path TEXT,
-        country TEXT,
-        city TEXT,
-        region TEXT,
-        latitude REAL,
-        longitude REAL,
-        fingerprint TEXT,
-        screen_width INTEGER,
-        screen_height INTEGER,
-        screen_color_depth INTEGER,
-        pixel_ratio REAL,
-        avail_width INTEGER,
-        avail_height INTEGER,
-        screen_orientation TEXT,
-        hardware_concurrency INTEGER,
-        gpu_vendor TEXT,
-        gpu_renderer TEXT
+        user_agent TEXT
     )
     """)
+    
+    new_columns = [
+        ("referrer", "TEXT"), ("languages", "TEXT"), ("full_path", "TEXT"),
+        ("country", "TEXT"), ("city", "TEXT"), ("region", "TEXT"),
+        ("latitude", "REAL"), ("longitude", "REAL"), ("fingerprint", "TEXT"),
+        ("screen_width", "INTEGER"), ("screen_height", "INTEGER"),
+        ("screen_color_depth", "INTEGER"), ("pixel_ratio", "REAL"),
+        ("avail_width", "INTEGER"), ("avail_height", "INTEGER"),
+        ("screen_orientation", "TEXT"), ("hardware_concurrency", "INTEGER"),
+        ("gpu_vendor", "TEXT"), ("gpu_renderer", "TEXT")
+    ]
+    
+    for col_name, col_type in new_columns:
+        try:
+            cur.execute(f"ALTER TABLE visitors ADD COLUMN {col_name} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+    
     conn.commit()
     conn.close()
 
@@ -62,16 +62,16 @@ init_db()
 
 def get_geolocation(ip):
     if not ip or ip in ['127.0.0.1', '::1']:
-        return {}
+        return {}, None
     try:
         r = requests.get(f"http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,lat,lon", timeout=5)
         if r.status_code == 200:
             data = r.json()
             if data.get("status") == "success":
-                return data
+                return data, None
     except:
         pass
-    return {}
+    return {}, None
 
 def generate_fingerprint(ip, ua_string):
     try:
@@ -80,6 +80,7 @@ def generate_fingerprint(ip, ua_string):
     except:
         return "unknown"
 
+# Сторінка для пінгу
 @app.route("/ping")
 def ping():
     return "ok", 200
@@ -118,7 +119,7 @@ def index():
 
     fetch('/track', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(data)
     }).catch(() => {});
     </script>
@@ -128,19 +129,24 @@ def index():
 def track():
     try:
         client_data = request.get_json() or {}
+        
         ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-        if ',' in ip: ip = ip.split(',')[0].strip()
+        if ',' in ip: 
+            ip = ip.split(',')[0].strip()
 
         ua_string = request.headers.get("User-Agent", "")
         ua = parse(ua_string)
-        geo = get_geolocation(ip)
+
+        geo_data, _ = get_geolocation(ip)
         fingerprint = generate_fingerprint(ip, ua_string)
 
+        # Київський час (UTC+3)
         kyiv_time = datetime.utcnow() + timedelta(hours=3)
         visit_time = kyiv_time.strftime("%Y-%m-%d %H:%M:%S")
 
         conn = sqlite3.connect(DB)
         cur = conn.cursor()
+        
         cur.execute("""
         INSERT INTO visitors 
         (visit_time, ip, browser, os, device, user_agent, referrer, languages, full_path,
@@ -151,18 +157,33 @@ def track():
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             visit_time, ip,
-            ua.browser.family or "Unknown", ua.os.family or "Unknown", ua.device.family or "Unknown",
-            ua_string, request.referrer, str(request.accept_languages), request.url,
-            geo.get("country"), geo.get("city"), geo.get("regionName"),
-            geo.get("lat"), geo.get("lon"), fingerprint,
-            client_data.get("screen_width"), client_data.get("screen_height"),
-            client_data.get("screen_color_depth"), client_data.get("pixel_ratio"),
-            client_data.get("avail_width"), client_data.get("avail_height"),
-            client_data.get("screen_orientation"), client_data.get("hardware_concurrency"),
-            client_data.get("gpu_vendor"), client_data.get("gpu_renderer")
+            ua.browser.family or "Unknown",
+            ua.os.family or "Unknown",
+            ua.device.family or "Unknown",
+            ua_string,
+            request.referrer,
+            str(request.accept_languages),
+            request.url,
+            geo_data.get("country"),
+            geo_data.get("city"),
+            geo_data.get("regionName"),
+            geo_data.get("lat"),
+            geo_data.get("lon"),
+            fingerprint,
+            client_data.get("screen_width"),
+            client_data.get("screen_height"),
+            client_data.get("screen_color_depth"),
+            client_data.get("pixel_ratio"),
+            client_data.get("avail_width"),
+            client_data.get("avail_height"),
+            client_data.get("screen_orientation"),
+            client_data.get("hardware_concurrency"),
+            client_data.get("gpu_vendor"),
+            client_data.get("gpu_renderer")
         ))
         conn.commit()
         conn.close()
+        
         return "ok", 200
     except Exception as e:
         print("Track error:", e)
@@ -172,26 +193,37 @@ def track():
 def admin():
     conn = sqlite3.connect(DB)
     cur = conn.cursor()
-    cur.execute("SELECT * FROM visitors ORDER BY id DESC")
+    cur.execute("""
+    SELECT 
+        visit_time, ip, country, city, browser, os, device,
+        screen_width, screen_height, hardware_concurrency,
+        gpu_vendor, gpu_renderer, referrer, fingerprint
+    FROM visitors 
+    ORDER BY id DESC
+    """)
     rows = cur.fetchall()
     conn.close()
 
     html = """
-    <h1>Відвідувачі</h1>
-    <p><a href="/admin/export">📥 Завантажити CSV</a></p>
+    <h1>Відвідувачі — Розширена аналітика</h1>
+    <p><a href="/admin/export">📥 Завантажити CSV</a> | <a href="/ping">Ping</a></p>
     <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%; font-size: 14px;">
         <tr style="background: #f0f0f0;">
             <th>Час (Київ)</th><th>IP</th><th>Країна</th><th>Місто</th>
-            <th>Браузер</th><th>ОС</th><th>Екран</th><th>CPU ядер</th><th>GPU</th>
+            <th>Браузер</th><th>ОС</th><th>Пристрій</th>
+            <th>Екран</th><th>CPU ядер</th><th>GPU Vendor</th><th>GPU Renderer</th>
+            <th>Referrer</th><th>Fingerprint</th>
         </tr>
     """
     for row in rows:
-        screen = f"{row[15]}×{row[16]}" if row[15] and row[16] else "-"
-        gpu = row[24] if len(row) > 24 else "-"
+        screen = f"{row[7]}×{row[8]}" if row[7] and row[8] else "-"
         html += f"""
         <tr>
-            <td>{row[1]}</td><td>{row[2]}</td><td>{row[9] or '-'}</td><td>{row[10] or '-'}</td>
-            <td>{row[3]}</td><td>{row[4]}</td><td>{screen}</td><td>{row[21] or '-'}</td><td>{gpu}</td>
+            <td>{row[0]}</td><td>{row[1]}</td><td>{row[2] or '-'}</td><td>{row[3] or '-'}</td>
+            <td>{row[4]}</td><td>{row[5]}</td><td>{row[6]}</td>
+            <td>{screen}</td><td>{row[9] or '-'}</td>
+            <td>{row[10] or '-'}</td><td>{row[11] or '-'}</td>
+            <td>{row[12] or '-'}</td><td>{row[13]}</td>
         </tr>
         """
     html += "</table>"

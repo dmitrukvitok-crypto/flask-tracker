@@ -4,9 +4,13 @@ import sqlite3
 from datetime import datetime
 import requests
 import hashlib
+import pytz  # ← Додаємо для правильного часу
 
 app = Flask(__name__)
 DB = "visitors.db"
+
+# Часовий пояс України
+KYIV_TZ = pytz.timezone('Europe/Kiev')
 
 def init_db():
     conn = sqlite3.connect(DB)
@@ -25,25 +29,14 @@ def init_db():
     """)
     
     new_columns = [
-        ("referrer", "TEXT"),
-        ("languages", "TEXT"),
-        ("full_path", "TEXT"),
-        ("country", "TEXT"),
-        ("city", "TEXT"),
-        ("region", "TEXT"),
-        ("latitude", "REAL"),
-        ("longitude", "REAL"),
-        ("fingerprint", "TEXT"),
-        ("screen_width", "INTEGER"),
-        ("screen_height", "INTEGER"),
-        ("screen_color_depth", "INTEGER"),
-        ("pixel_ratio", "REAL"),
-        ("avail_width", "INTEGER"),
-        ("avail_height", "INTEGER"),
-        ("screen_orientation", "TEXT"),
-        ("hardware_concurrency", "INTEGER"),
-        ("gpu_vendor", "TEXT"),      # ← Нове
-        ("gpu_renderer", "TEXT")     # ← Нове
+        ("referrer", "TEXT"), ("languages", "TEXT"), ("full_path", "TEXT"),
+        ("country", "TEXT"), ("city", "TEXT"), ("region", "TEXT"),
+        ("latitude", "REAL"), ("longitude", "REAL"), ("fingerprint", "TEXT"),
+        ("screen_width", "INTEGER"), ("screen_height", "INTEGER"),
+        ("screen_color_depth", "INTEGER"), ("pixel_ratio", "REAL"),
+        ("avail_width", "INTEGER"), ("avail_height", "INTEGER"),
+        ("screen_orientation", "TEXT"), ("hardware_concurrency", "INTEGER"),
+        ("gpu_vendor", "TEXT"), ("gpu_renderer", "TEXT")
     ]
     
     for col_name, col_type in new_columns:
@@ -84,7 +77,6 @@ def index():
     <p>Ваш візит детально зареєстровано.</p>
     
     <script>
-    // Збираємо дані
     const data = {
         screen_width: screen.width,
         screen_height: screen.height,
@@ -98,7 +90,6 @@ def index():
         gpu_renderer: null
     };
 
-    // WebGL — визначення відеокарти
     try {
         const canvas = document.createElement('canvas');
         const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
@@ -111,7 +102,6 @@ def index():
         }
     } catch(e) {}
 
-    // Відправка даних
     fetch('/track', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -126,13 +116,17 @@ def track():
         client_data = request.get_json() or {}
         
         ip = request.headers.get("X-Forwarded-For", request.remote_addr)
-        if ',' in ip: ip = ip.split(',')[0].strip()
+        if ',' in ip: 
+            ip = ip.split(',')[0].strip()
 
         ua_string = request.headers.get("User-Agent", "")
         ua = parse(ua_string)
 
         geo_data, _ = get_geolocation(ip)
         fingerprint = generate_fingerprint(ip, ua_string)
+
+        # Правильний час для України
+        visit_time = datetime.now(KYIV_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
         conn = sqlite3.connect(DB)
         cur = conn.cursor()
@@ -146,7 +140,7 @@ def track():
          gpu_vendor, gpu_renderer)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            visit_time,
             ip,
             ua.browser.family or "Unknown",
             ua.os.family or "Unknown",
@@ -200,7 +194,7 @@ def admin():
     <p><a href="/admin/export">📥 Завантажити CSV</a></p>
     <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%; font-size: 14px;">
         <tr style="background: #f0f0f0;">
-            <th>Час</th><th>IP</th><th>Країна</th><th>Місто</th>
+            <th>Час (Київ)</th><th>IP</th><th>Країна</th><th>Місто</th>
             <th>Браузер</th><th>ОС</th><th>Пристрій</th>
             <th>Екран</th><th>CPU ядер</th><th>GPU Vendor</th><th>GPU Renderer</th>
             <th>Referrer</th><th>Fingerprint</th>
@@ -235,7 +229,7 @@ def export_csv():
     csv.writer(si).writerows([columns] + rows)
     return si.getvalue(), 200, {
         'Content-Type': 'text/csv',
-        'Content-Disposition': f'attachment; filename=visitors_{datetime.now().strftime("%Y%m%d")}.csv'
+        'Content-Disposition': f'attachment; filename=visitors_{datetime.now(KYIV_TZ).strftime("%Y%m%d_%H%M")}.csv'
     }
 
 if __name__ == "__main__":

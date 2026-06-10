@@ -4,13 +4,14 @@ import sqlite3
 from datetime import datetime, timedelta
 import requests
 import hashlib
+import os
 import threading
 import time
 
 app = Flask(__name__)
-DB = "visitors.db"   # Звичайна база
+DB = "/data/visitors.db"   # Зберігається на постійному диску
 
-# Keep-alive
+# Keep-alive кожні 10 хвилин
 def keep_alive():
     while True:
         try:
@@ -176,12 +177,12 @@ def admin():
     conn.close()
 
     html = """
-    <h1>Відвідувачі (Free план)</h1>
+    <h1>Відвідувачі</h1>
     <p><a href="/admin/export">📥 Завантажити CSV</a></p>
-    <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%;">
+    <table border="1" cellpadding="8" style="border-collapse: collapse; width: 100%; font-size: 14px;">
         <tr style="background: #f0f0f0;">
             <th>Час (Київ)</th><th>IP</th><th>Країна</th><th>Місто</th>
-            <th>Браузер</th><th>ОС</th><th>Екран</th><th>CPU</th><th>GPU</th>
+            <th>Браузер</th><th>ОС</th><th>Екран</th><th>CPU ядер</th><th>GPU</th>
         </tr>
     """
     for row in rows:
